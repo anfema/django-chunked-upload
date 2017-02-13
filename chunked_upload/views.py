@@ -1,9 +1,11 @@
 import re
+import json
 
 from django.views.generic import View
 from django.shortcuts import get_object_or_404
 from django.core.files.base import ContentFile
 from django.utils import timezone
+from django.http import QueryDict
 
 from .settings import MAX_BYTES
 from .models import ChunkedUpload, Dataset
@@ -185,7 +187,6 @@ class ChunkedUploadView(ChunkedUploadBaseView):
 				chunked_upload = self.create_chunked_upload(save=False, upload_id=upload_id, field_name=field_name, **attrs)
 		else:
 			chunked_upload = self.create_chunked_upload(save=False, field_name=field_name, **attrs)
-
 		content_range = request.META.get(self.content_range_header, '')
 		match = self.content_range_pattern.match(content_range)
 		if match:
@@ -200,7 +201,6 @@ class ChunkedUploadView(ChunkedUploadBaseView):
 			start = 0
 			end = chunk.size - 1
 			total = chunk.size
-
 		chunk_size = end - start + 1
 		max_bytes = self.get_max_bytes(request)
 
@@ -209,6 +209,7 @@ class ChunkedUploadView(ChunkedUploadBaseView):
 				status=http_status.HTTP_400_BAD_REQUEST,
 				detail='Size of file exceeds the limit (%s bytes)' % max_bytes
 			)
+
 		if chunked_upload.offset != start:
 			raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
 									 detail='Offsets do not match',
@@ -216,13 +217,11 @@ class ChunkedUploadView(ChunkedUploadBaseView):
 		if chunk.size != chunk_size:
 			raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
 									 detail="File size doesn't match headers")
-
 		chunked_upload.append_chunk(chunk, chunk_size=chunk_size, save=False)
-
 		self._save(chunked_upload)
-
 		return Response(self.get_response_data(chunked_upload, request),
 						status=http_status.HTTP_200_OK)
+
 
 
 class ChunkedUploadCompleteView(ChunkedUploadBaseView):
@@ -258,12 +257,22 @@ class ChunkedUploadCompleteView(ChunkedUploadBaseView):
 									 detail='md5 checksum does not match')
 
 	def _post(self, request, *args, **kwargs):
-		upload_id = request.POST.get('upload_id')
+		data = request.POST
+		if not request.POST:
+			simple_dict = json.loads(request.body.decode('utf-8'))
+			data = QueryDict('', mutable=True)
+			data.update(simple_dict)
+
+		upload_id = data.get('upload_id')
 		md5 = {}
-		for key, value in request.POST.dict().items():
-			m = re.search('(?P<key>[^[]*)\[(?P<field>.*)\]', key)
-			if m and m.group('key') == 'md5':
-				md5[m.group('field')] = value
+		if 'md5' in data:
+			for key, value in data.get("md5").items():
+				md5[key] = value
+		else:
+			for key, value in data.dict().items():
+				m = re.search('(?P<key>[^[]*)\[(?P<field>.*)\]', key)
+				if m and m.group('key') == 'md5':
+					md5[m.group('field')] = value
 
 		error_msg = None
 		if self.do_md5_check:
@@ -284,10 +293,10 @@ class ChunkedUploadCompleteView(ChunkedUploadBaseView):
 			chunked_upload.status = COMPLETE
 			chunked_upload.completed_on = timezone.now()
 			self._save(chunked_upload)
-			mutable = request.POST._mutable
-			request.POST._mutable = True
-			request.POST['file_name'] = chunked_upload.field_name
-			request.POST._mutable = mutable
+			mutable = data._mutable
+			data._mutable = True
+			data['file_name'] = chunked_upload.field_name
+			data._mutable = mutable
 			self.on_completion(chunked_upload.get_uploaded_file(), request)
 
 		return Response(self.get_response_data(upload_id, request),
